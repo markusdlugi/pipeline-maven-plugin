@@ -51,6 +51,8 @@ public class PipelineGraphPublisher extends MavenPublisher {
     private boolean includeScopeProvided = true;
 
     private boolean skipDownstreamTriggers;
+    
+    private boolean triggerAfterStep;
 
     /**
      * Lifecycle phase threshold to trigger downstream pipelines, "deploy" or "install" or "package" or ...
@@ -318,7 +320,16 @@ public class PipelineGraphPublisher extends MavenPublisher {
         this.skipDownstreamTriggers = skipDownstreamTriggers;
     }
 
-    public boolean isIgnoreUpstreamTriggers() {
+    public boolean isTriggerAfterStep() {
+		return triggerAfterStep;
+	}
+
+    @DataBoundSetter
+	public void setTriggerAfterStep(boolean triggerAfterStep) {
+		this.triggerAfterStep = triggerAfterStep;
+	}
+
+	public boolean isIgnoreUpstreamTriggers() {
         return ignoreUpstreamTriggers;
     }
 

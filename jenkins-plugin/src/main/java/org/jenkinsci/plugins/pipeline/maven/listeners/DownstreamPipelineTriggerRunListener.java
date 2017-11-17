@@ -23,8 +23,11 @@ import org.jenkinsci.plugins.pipeline.maven.trigger.WorkflowJobDependencyTrigger
 import org.jenkinsci.plugins.workflow.job.WorkflowJob;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -41,9 +44,17 @@ public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRu
 
     private final static Logger LOGGER = Logger.getLogger(DownstreamPipelineTriggerRunListener.class.getName());
 
+    private static Set<WorkflowRun> triggeredBuilds = new HashSet<>();
+    
     @Override
     public void onCompleted(WorkflowRun upstreamBuild, @Nonnull TaskListener listener) {
         LOGGER.log(Level.FINER, "onCompleted({0})", new Object[]{upstreamBuild});
+        
+        if(triggeredBuilds.contains(upstreamBuild)) {
+        	return;
+        }
+        triggeredBuilds.add(upstreamBuild);
+        
         if(LOGGER.isLoggable(Level.FINER)) {
             listener.getLogger().println("[withMaven] pipelineGraphPublisher - triggerDownstreamPipelines");
         }
