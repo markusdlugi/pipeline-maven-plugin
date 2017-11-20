@@ -122,7 +122,7 @@ public class PipelineGraphPublisher extends MavenPublisher {
         		if (LOGGER.isLoggable(Level.FINER)) {
                     listener.getLogger().println("[withMaven] pipelineGraphPublisher - Skip recording dependency to generated artifact: " + dependency.getId());
         		}
-        		continue;
+                continue;
         	}
             if (dependency.snapshot) {
                 if (!includeSnapshotVersions) {
