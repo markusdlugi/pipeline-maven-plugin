@@ -94,9 +94,6 @@ import org.jenkinsci.plugins.configfiles.maven.security.CredentialsHelper;
 import org.jenkinsci.plugins.configfiles.maven.security.ServerCredentialMapping;
 import org.jenkinsci.plugins.pipeline.maven.console.MaskPasswordsConsoleLogFilter;
 import org.jenkinsci.plugins.pipeline.maven.console.MavenColorizerConsoleLogFilter;
-import org.jenkinsci.plugins.pipeline.maven.listeners.DownstreamPipelineTriggerRunListener;
-import org.jenkinsci.plugins.pipeline.maven.publishers.PipelineGraphPublisher;
-import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.jenkinsci.plugins.workflow.steps.BodyExecution;
 import org.jenkinsci.plugins.workflow.steps.BodyExecutionCallback;
 import org.jenkinsci.plugins.workflow.steps.BodyInvoker;
@@ -134,7 +131,6 @@ class WithMavenStepExecution extends StepExecution {
      */
     private transient EnvVars envOverride;
     private final transient Run<?, ?> build;
-    private transient WorkflowRun workflowRun;
 
     private transient Computer computer;
     private transient FilePath tempBinDir;
@@ -156,7 +152,6 @@ class WithMavenStepExecution extends StepExecution {
         launcher = context.get(Launcher.class);
         env = context.get(EnvVars.class);
         build = context.get(Run.class);
-        workflowRun = context.get(WorkflowRun.class);
     }
 
     @Override
@@ -219,7 +214,7 @@ class WithMavenStepExecution extends StepExecution {
 
         LOGGER.log(Level.FINEST, "envOverride: {0}", envOverride); // JENKINS-40484
 
-        body = getContext().newBodyInvoker().withContexts(envEx, newFilter).withCallback(new WorkspaceCleanupCallback(tempBinDir, step.getOptions(), this)).start();
+        body = getContext().newBodyInvoker().withContexts(envEx, newFilter).withCallback(new WorkspaceCleanupCallback(tempBinDir, step.getOptions())).start();
 
         return false;
     }
@@ -903,14 +898,12 @@ class WithMavenStepExecution extends StepExecution {
         private final FilePath tempBinDir;
 
         private final List<MavenPublisher> options;
-        private final WithMavenStepExecution execution;
 
         private final MavenSpyLogProcessor mavenSpyLogProcessor = new MavenSpyLogProcessor();
 
-        public WorkspaceCleanupCallback(@Nonnull FilePath tempBinDir, @Nonnull List<MavenPublisher> options, @Nonnull WithMavenStepExecution execution) {
+        public WorkspaceCleanupCallback(@Nonnull FilePath tempBinDir, @Nonnull List<MavenPublisher> options) {
             this.tempBinDir = tempBinDir;
             this.options = options;
-            this.execution = execution;
         }
 
         @Override
@@ -929,19 +922,6 @@ class WithMavenStepExecution extends StepExecution {
                 } catch (Throwable t) {
                     t.printStackTrace();
                 }
-            }
-            
-            // Trigger after step if it is enabled
-            for(MavenPublisher publisher : options) {
-            	if(publisher instanceof PipelineGraphPublisher) {
-            		PipelineGraphPublisher pgp = (PipelineGraphPublisher) publisher;
-            		if(pgp.isDisabled() || pgp.isSkipDownstreamTriggers() || !pgp.isTriggerAfterStep()) {
-            			return;
-            		}
-            		
-            		DownstreamPipelineTriggerRunListener triggerRunListener = ExtensionList.lookup(DownstreamPipelineTriggerRunListener.class).get(0);
-                    triggerRunListener.onCompleted(execution.workflowRun, execution.listener);
-            	}
             }
         }
 

@@ -3,6 +3,7 @@ package org.jenkinsci.plugins.pipeline.maven.publishers;
 import static org.jenkinsci.plugins.pipeline.maven.publishers.DependenciesLister.listDependencies;
 
 import hudson.Extension;
+import hudson.ExtensionList;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.util.ListBoxModel;
@@ -12,7 +13,9 @@ import org.jenkinsci.plugins.pipeline.maven.GlobalPipelineMavenConfig;
 import org.jenkinsci.plugins.pipeline.maven.MavenPublisher;
 import org.jenkinsci.plugins.pipeline.maven.MavenSpyLogProcessor;
 import org.jenkinsci.plugins.pipeline.maven.dao.PipelineMavenPluginDao;
+import org.jenkinsci.plugins.pipeline.maven.listeners.DownstreamPipelineTriggerRunListener;
 import org.jenkinsci.plugins.pipeline.maven.util.XmlUtils;
+import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.jenkinsci.plugins.workflow.steps.StepContext;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
@@ -93,6 +96,16 @@ public class PipelineGraphPublisher extends MavenPublisher {
         
         recordDependencies(dependencies, generatedArtifacts, run, listener, dao);
         recordGeneratedArtifacts(generatedArtifacts, executedLifecyclePhases, run, listener, dao);
+        
+        if(triggerAfterStep) {
+        	listener.getLogger().println("[withMaven] Triggering after step");
+        	DownstreamPipelineTriggerRunListener triggerRunListener = ExtensionList.lookup(DownstreamPipelineTriggerRunListener.class).get(0);
+            if(triggerRunListener == null) {
+            	listener.getLogger().println("[withMaven] Unable to get listener!");
+            	return;
+            }
+    		triggerRunListener.onCompleted((WorkflowRun) run, listener);
+        }
     }
 
     protected void recordDependencies(List<MavenSpyLogProcessor.MavenDependency> dependencies, List<MavenSpyLogProcessor.MavenArtifact> generatedArtifacts,
@@ -108,8 +121,8 @@ public class PipelineGraphPublisher extends MavenPublisher {
         	if(generatedArtifacts.contains(dependency.asMavenArtifact())) {
         		if (LOGGER.isLoggable(Level.FINER)) {
                     listener.getLogger().println("[withMaven] pipelineGraphPublisher - Skip recording dependency to generated artifact: " + dependency.getId());
-                    continue;
         		}
+        		continue;
         	}
             if (dependency.snapshot) {
                 if (!includeSnapshotVersions) {
@@ -253,7 +266,8 @@ public class PipelineGraphPublisher extends MavenPublisher {
                 "versions={snapshot:" + isIncludeSnapshotVersions() + ", release:" + isIncludeReleaseVersions() + "}, " +
                 "skipDownstreamTriggers=" + isSkipDownstreamTriggers() + ", " +
                 "lifecycleThreshold=" + getLifecycleThreshold() + ", " +
-                "ignoreUpstreamTriggers=" + isIgnoreUpstreamTriggers() +
+                "ignoreUpstreamTriggers=" + isIgnoreUpstreamTriggers() + ", " +
+                "triggerAfterStep=" + isTriggerAfterStep() + 
                 ']';
     }
 
