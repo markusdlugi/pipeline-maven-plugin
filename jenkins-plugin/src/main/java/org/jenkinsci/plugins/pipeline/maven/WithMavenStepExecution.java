@@ -43,8 +43,10 @@ import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import com.cloudbees.hudson.plugins.folder.AbstractFolder;
 import com.cloudbees.plugins.credentials.Credentials;
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.cloudbees.plugins.credentials.common.IdCredentials;
@@ -68,7 +70,10 @@ import hudson.Util;
 import hudson.console.ConsoleLogFilter;
 import hudson.model.BuildListener;
 import hudson.model.Computer;
+import hudson.model.Item;
+import hudson.model.ItemGroup;
 import hudson.model.JDK;
+import hudson.model.Job;
 import hudson.model.Node;
 import hudson.model.Run;
 import hudson.model.TaskListener;
@@ -130,14 +135,14 @@ class WithMavenStepExecution extends StepExecution {
      * in "envOverride" will override the environment variables defined in "env"
      */
     private transient EnvVars envOverride;
-    private final transient Run<?, ?> build;
+    private final transient Run<? extends Job<?, ?>, ? extends Run<?, ?>> build;
 
     private transient Computer computer;
     private transient FilePath tempBinDir;
     private transient BodyExecution body;
 
     /**
-     * Indicates if running on docker with <tt>docker.image()</tt>
+     * Indicates if running on docker with <tt>docker.image()</tt> or <tt>container()</tt>
      */
     private boolean withContainer;
 
@@ -181,14 +186,18 @@ class WithMavenStepExecution extends StepExecution {
         withContainer = detectWithContainer();
 
         if (withContainer) {
-            listener.getLogger().print("[withMaven] WARNING: \"withMaven(){...}\" step running within \"docker.image('image').inside {...}\"." +
-                    " Since the Docker Pipeline Plugin version 1.14, you MUST prepend the 'MVN_CMD_DIR' environment variable" +
-                    " to the 'PATH' environment variable in every 'sh' step that invokes 'mvn'. ");
-            listener.getLogger().print("See ");
+            listener.getLogger().println("[withMaven] WARNING: \"withMaven(){...}\" step running within a container." +
+                    " Since the Docker Pipeline Plugin version 1.14, you MUST:");
+            listener.getLogger().println("[withMaven] * Either prepend the 'MVN_CMD_DIR' environment variable" +
+                    " to the 'PATH' environment variable in every 'sh' step that invokes 'mvn' (e.g. \"sh \'export PATH=$MVN_CMD_DIR:$PATH && mvn clean deploy\' \"). ");
+            listener.getLogger().println("[withMaven] * Or use 'MVN_CMD' instead of invoking 'mvn'" +
+                    " (e.g. \"sh \'$MVN_CMD clean deploy\' \"). ");
+            listener.getLogger().print("[withMaven] * Or use ");
+            listener.hyperlink("https://github.com/takari/maven-wrapper", "Takari's Maven Wrapper");
+            listener.getLogger().println(" (e.g. \"sh './mvnw clean deploy'\")");
+            listener.getLogger().print("[withMaven] See ");
             listener.hyperlink("https://wiki.jenkins.io/display/JENKINS/Pipeline+Maven+Plugin#PipelineMavenPlugin-HowtousethePipelineMavenPluginwithDocker", "Pipeline Maven Plugin FAQ");
             listener.getLogger().println(".");
-            listener.getLogger().println("[withMaven] Sample:");
-            listener.getLogger().println("[withMaven]    sh \"export PATH=$MVN_CMD_DIR:$PATH && mvn ...\"");
         }
 
         setupJDK();
@@ -214,13 +223,13 @@ class WithMavenStepExecution extends StepExecution {
 
         LOGGER.log(Level.FINEST, "envOverride: {0}", envOverride); // JENKINS-40484
 
-        body = getContext().newBodyInvoker().withContexts(envEx, newFilter).withCallback(new WorkspaceCleanupCallback(tempBinDir, step.getOptions())).start();
+        body = getContext().newBodyInvoker().withContexts(envEx, newFilter).withCallback(new WithMavenStepExecutionCallBack(tempBinDir, step.getOptions(), step.getPublisherStrategy())).start();
 
         return false;
     }
 
     /**
-     * Detects if this step is running inside <tt>docker.image()</tt>
+     * Detects if this step is running inside <tt>docker.image()</tt> or <tt>container()</tt>
      * <p>
      * This has the following implications:
      * <li>Tool intallers do no work, as they install in the host, see:
@@ -229,17 +238,25 @@ class WithMavenStepExecution extends StepExecution {
      * container running the <tt>sh</tt> command for maven This is due to the fact that <tt>docker.image()</tt> all it
      * does is decorate the launcher and excute the command with a <tt>docker run</tt> which means that the inherited
      * environment from the OS will be totally different eg: MAVEN_HOME, JAVA_HOME, PATH, etc.
+     * <li>Kubernetes' <tt>container()</tt> support is still in early stages, and environment variables might not be
+     * completely configured, depending on the version of the Jenkins Kubernetes plugin.
      *
-     * @return true if running inside docker container with <tt>docker.image()</tt>
+     * @return true if running inside a container with <tt>docker.image()</tt> or <tt>container()</tt>
      * @see <a href=
-     * "https://github.com/jenkinsci/docker-workflow-plugin/blob/master/src/main/java/org/jenkinsci/plugins/docker/workflow/WithContainerStep.java#L213">
-     * WithContainerStep</a>
+     * "https://github.com/jenkinsci/docker-workflow-plugin/blob/master/src/main/java/org/jenkinsci/plugins/docker/workflow/WithContainerStep.java">
+     * WithContainerStep</a> and <a href=
+     * "https://github.com/jenkinsci/kubernetes-plugin/blob/master/src/main/java/org/csanchez/jenkins/plugins/kubernetes/pipeline/ContainerStep.java">
+     * ContainerStep</a>
      */
     private boolean detectWithContainer() {
         Launcher launcher1 = launcher;
         while (launcher1 instanceof Launcher.DecoratedLauncher) {
-            if (launcher1.getClass().getName().contains("WithContainerStep")) {
+            String launcherClassName = launcher1.getClass().getName();
+            if (launcherClassName.contains("WithContainerStep")) {
                 LOGGER.fine("Step running within docker.image()");
+                return true;
+            } else if (launcherClassName.contains("ContainerExecDecorator")) {
+                LOGGER.fine("Step running within container()");
                 return true;
             }
             launcher1 = ((Launcher.DecoratedLauncher) launcher1).getInner();
@@ -253,22 +270,22 @@ class WithMavenStepExecution extends StepExecution {
     private void setupJDK() throws AbortException, IOException, InterruptedException {
         String jdkInstallationName = step.getJdk();
         if (StringUtils.isEmpty(jdkInstallationName)) {
-            console.println("[withMaven] use JDK installation provided by the build agent");
+            console.println("[withMaven] using JDK installation provided by the build agent");
             return;
         }
 
         if (withContainer) {
             // see #detectWithContainer()
             LOGGER.log(Level.FINE, "Ignoring JDK installation parameter: {0}", jdkInstallationName);
-            console.println("WARNING: \"withMaven(){...}\" step running within \"docker.image().inside{...}\"," +
+            console.println("WARNING: \"withMaven(){...}\" step running within a container," +
                     " tool installations are not available see https://issues.jenkins-ci.org/browse/JENKINS-36159. " +
                     "You have specified a JDK installation \"" + jdkInstallationName + "\", which will be ignored.");
             return;
         }
 
-        console.println("[withMaven] use JDK installation " + jdkInstallationName);
+        console.println("[withMaven] using JDK installation " + jdkInstallationName);
 
-        JDK jdk = Jenkins.getActiveInstance().getJDK(jdkInstallationName);
+        JDK jdk = Jenkins.getInstance().getJDK(jdkInstallationName);
         if (jdk == null) {
             throw new AbortException("Could not find the JDK installation: " + jdkInstallationName + ". Make sure it is configured on the Global Tool Configuration page");
         }
@@ -319,13 +336,13 @@ class WithMavenStepExecution extends StepExecution {
         mavenConfig.append("--batch-mode ");
         mavenConfig.append("--show-version ");
         if (StringUtils.isNotEmpty(settingsFilePath)) {
-            mavenConfig.append("--settings " + settingsFilePath + " ");
+            mavenConfig.append("--settings \"" + settingsFilePath + "\" ");
         }
         if (StringUtils.isNotEmpty(globalSettingsFilePath)) {
-            mavenConfig.append("--global-settings " + globalSettingsFilePath + " ");
+            mavenConfig.append("--global-settings \"" + globalSettingsFilePath + "\" ");
         }
         if (StringUtils.isNotEmpty(mavenLocalRepo)) {
-            mavenConfig.append("-Dmaven.repo.local=" + mavenLocalRepo + " ");
+            mavenConfig.append("\"-Dmaven.repo.local=" + mavenLocalRepo + "\" ");
         }
 
         envOverride.put("MAVEN_CONFIG", mavenConfig.toString());
@@ -348,17 +365,17 @@ class WithMavenStepExecution extends StepExecution {
         LOGGER.log(Level.FINE, "Using temp dir: {0}", tempBinDir.getRemote());
 
         if (mvnExecPath == null) {
-            throw new AbortException("Couldn\u2019t find any maven executable");
+            // 'mvn' execuable not found. Cannot create a script wrapper.
+        } else {
+            FilePath mvnExec = new FilePath(ws.getChannel(), mvnExecPath);
+            String content = generateMavenWrapperScriptContent(mvnExec, mavenConfig.toString());
+
+            // ADD MAVEN WRAPPER SCRIPT PARENT DIRECTORY TO PATH
+            // WARNING MUST BE INVOKED AFTER obtainMavenExec(), THERE SEEM TO BE A BUG IN ENVIRONMENT VARIABLE HANDLING IN obtainMavenExec()
+            envOverride.put("PATH+MAVEN", tempBinDir.getRemote());
+
+            createWrapperScript(tempBinDir, mvnExec.getName(), content);
         }
-
-        FilePath mvnExec = new FilePath(ws.getChannel(), mvnExecPath);
-        String content = generateMavenWrapperScriptContent(mvnExec);
-
-        // ADD MAVEN WRAPPER SCRIPT PARENT DIRECTORY TO PATH
-        // WARNING MUST BE INVOKED AFTER obtainMavenExec(), THERE SEEM TO BE A BUG IN ENVIRONMENT VARIABLE HANDLING IN obtainMavenExec()
-        envOverride.put("PATH+MAVEN", tempBinDir.getRemote());
-
-        createWrapperScript(tempBinDir, mvnExec.getName(), content);
 
     }
 
@@ -397,103 +414,89 @@ class WithMavenStepExecution extends StepExecution {
         return mavenSpyJarFilePath;
     }
 
+    /**
+     * Find the "mvn" executable if exists, either specified by the "withMaven(){}" step or provided by the build agent.
+     *
+     * @return remote path to the Maven executable or {@code null} if none found
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    @Nullable
     private String obtainMavenExec() throws IOException, InterruptedException {
         String mavenInstallationName = step.getMaven();
         LOGGER.log(Level.FINE, "Setting up maven: {0}", mavenInstallationName);
 
         StringBuilder consoleMessage = new StringBuilder("[withMaven]");
+        String mvnExecPath;
 
-        MavenInstallation mavenInstallation;
         if (StringUtils.isEmpty(mavenInstallationName)) {
             // no maven installation name is passed, we will search for the Maven installation on the agent
-            consoleMessage.append(" use Maven installation provided by the build agent");
-            mavenInstallation = null;
+            consoleMessage.append(" using Maven installation provided by the build agent");
         } else if (withContainer) {
             console.println(
-                    "WARNING: Specified Maven '" + mavenInstallationName + "' cannot be installed, will be ignored." +
-                            "Step running within docker.image() tool installations are not available see https://issues.jenkins-ci.org/browse/JENKINS-36159. ");
-            LOGGER.log(Level.FINE, "Ignoring Maven Installation parameter: {0}", mavenInstallationName);
-            mavenInstallation = null;
+                    "[withMaven] WARNING: Specified Maven '" + mavenInstallationName + "' cannot be installed, will be ignored. " +
+                            "Step running within a container, tool installations are not available see https://issues.jenkins-ci.org/browse/JENKINS-36159. ");
+            LOGGER.log(Level.FINE, "Running in docker-pipeline, ignore Maven Installation parameter: {0}", mavenInstallationName);
         } else {
-            mavenInstallation = null;
-            for (MavenInstallation i : getMavenInstallations()) {
-                if (mavenInstallationName.equals(i.getName())) {
-                    mavenInstallation = i;
-                    consoleMessage.append(" use Maven installation '" + mavenInstallation.getName() + "'");
-                    LOGGER.log(Level.FINE, "Found maven installation {0} with installation home {1}", new Object[]{mavenInstallation.getName(), mavenInstallation.getHome()});
-                    break;
-                }
-            }
-            if (mavenInstallation == null) {
-                throw new AbortException("Could not find Maven installation '" + mavenInstallationName + "'.");
-            }
+            return obtainMvnExecutableFromMavenInstallation(mavenInstallationName);
         }
 
 
-        String mvnExecPath;
-        if (mavenInstallation == null) {
-            // in case there are no installations available we fallback to the OS maven installation
-            // first we try MAVEN_HOME and M2_HOME
-            LOGGER.fine("Searching for Maven through MAVEN_HOME and M2_HOME environment variables...");
+        // in case there are no installations available we fallback to the OS maven installation
+        // first we try MAVEN_HOME and M2_HOME
+        LOGGER.fine("Searching for Maven through MAVEN_HOME and M2_HOME environment variables...");
 
-            if (withContainer) {
-                // in case of docker.image we need to execute a command through the decorated launcher and get the output.
-                LOGGER.fine("Calling printenv on docker container...");
-                String mavenHome = readFromProcess("printenv", MAVEN_HOME);
-                if (mavenHome == null) {
-                    mavenHome = readFromProcess("printenv", M2_HOME);
-                    if (StringUtils.isNotEmpty(mavenHome)) {
-                        consoleMessage.append(" with the environment variable M2_HOME=" + mavenHome);
-                    }
-                } else {
-                    consoleMessage.append(" with the environment variable MAVEN_HOME=" + mavenHome);
-                }
-
-                if (mavenHome == null) {
-                    LOGGER.log(Level.FINE, "NO maven installation discovered on docker container through MAVEN_HOME and M2_HOME environment variables");
-                    mvnExecPath = null;
-                } else {
-                    LOGGER.log(Level.FINE, "Found maven installation on {0}", mavenHome);
-                    mvnExecPath = mavenHome + "/bin/mvn"; // we can safely assume *nix
+        if (withContainer) {
+            // in case of docker.image we need to execute a command through the decorated launcher and get the output.
+            LOGGER.fine("Calling printenv on docker container...");
+            String mavenHome = readFromProcess("printenv", MAVEN_HOME);
+            if (mavenHome == null) {
+                mavenHome = readFromProcess("printenv", M2_HOME);
+                if (StringUtils.isNotEmpty(mavenHome)) {
+                    consoleMessage.append(" with the environment variable M2_HOME=" + mavenHome);
                 }
             } else {
-                // if not on docker we can use the computer environment
-                LOGGER.fine("Using computer environment...");
-                EnvVars agentEnv = getComputer().getEnvironment();
-                LOGGER.log(Level.FINE, "Agent env: {0}", agentEnv);
-                String mavenHome = agentEnv.get(MAVEN_HOME);
-                if (mavenHome == null) {
-                    mavenHome = agentEnv.get(M2_HOME);
-                    if (StringUtils.isNotEmpty(mavenHome)) {
-                        consoleMessage.append(" with the environment variable M2_HOME=" + mavenHome);
-                    }
-                } else {
-                    consoleMessage.append(" with the environment variable MAVEN_HOME=" + mavenHome);
-                }
-                if (mavenHome == null) {
-                    LOGGER.log(Level.FINE, "NO maven installation discovered on build agent through MAVEN_HOME and M2_HOME environment variables");
-                    mvnExecPath = null;
-                } else {
-                    LOGGER.log(Level.FINE, "Found maven installation on {0}", mavenHome);
-                    // Resort to maven installation to get the executable and build environment
-                    mavenInstallation = new MavenInstallation("Maven Auto-discovered", mavenHome, null);
-                    mavenInstallation.buildEnvVars(envOverride);
-                    mvnExecPath = mavenInstallation.getExecutable(launcher);
-                }
+                consoleMessage.append(" with the environment variable MAVEN_HOME=" + mavenHome);
+            }
+
+            if (mavenHome == null) {
+                LOGGER.log(Level.FINE, "NO maven installation discovered on docker container through MAVEN_HOME and M2_HOME environment variables");
+                mvnExecPath = null;
+            } else {
+                LOGGER.log(Level.FINE, "Found maven installation on {0}", mavenHome);
+                mvnExecPath = mavenHome + "/bin/mvn"; // we can safely assume *nix
             }
         } else {
-            Node node = getComputer().getNode();
-            if (node == null) {
-                throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());
+            // if not on docker we can use the computer environment
+            LOGGER.fine("Using computer environment...");
+            EnvVars agentEnv = getComputer().getEnvironment();
+            LOGGER.log(Level.FINE, "Agent env: {0}", agentEnv);
+            String mavenHome = agentEnv.get(MAVEN_HOME);
+            if (mavenHome == null) {
+                mavenHome = agentEnv.get(M2_HOME);
+                if (StringUtils.isNotEmpty(mavenHome)) {
+                    consoleMessage.append(" with the environment variable M2_HOME=" + mavenHome);
+                }
+            } else {
+                consoleMessage.append(" with the environment variable MAVEN_HOME=" + mavenHome);
             }
-            mavenInstallation = mavenInstallation.forNode(node, listener).forEnvironment(env);
-            mavenInstallation.buildEnvVars(envOverride);
-            mvnExecPath = mavenInstallation.getExecutable(launcher);
+            if (mavenHome == null) {
+                LOGGER.log(Level.FINE, "NO maven installation discovered on build agent through MAVEN_HOME and M2_HOME environment variables");
+                mvnExecPath = null;
+            } else {
+                LOGGER.log(Level.FINE, "Found maven installation on {0}", mavenHome);
+                // Resort to maven installation to get the executable and build environment
+                MavenInstallation mavenInstallation = new MavenInstallation("Maven Auto-discovered", mavenHome, null);
+                mavenInstallation.buildEnvVars(envOverride);
+                mvnExecPath = mavenInstallation.getExecutable(launcher);
+            }
         }
 
         // if at this point mvnExecPath is still null try to use which/where command to find a maven executable
         if (mvnExecPath == null) {
-            LOGGER.fine("No Maven Installation or MAVEN_HOME found, looking for mvn executable by using which/where command");
+            if (LOGGER.isLoggable(Level.FINE)) {
+                console.println("[withMaven] No Maven Installation or MAVEN_HOME found, looking for mvn executable by using which/where command");
+            }
             if (Boolean.TRUE.equals(getComputer().isUnix())) {
                 mvnExecPath = readFromProcess("/bin/sh", "-c", "which mvn");
             } else {
@@ -502,15 +505,50 @@ class WithMavenStepExecution extends StepExecution {
                     mvnExecPath = readFromProcess("where", "mvn.bat");
                 }
             }
-            consoleMessage.append(" with executable " + mvnExecPath);
+            if (mvnExecPath == null) {
+                boolean isUnix = Boolean.TRUE.equals(getComputer().isUnix());
+                String mvnwScript = isUnix ? "mvnw" : "mvnw.cmd";
+                boolean mvnwScriptExists = ws.child(mvnwScript).exists();
+                if (mvnwScriptExists) {
+                    consoleMessage =  new StringBuilder("[withMaven] Maven installation not specified in the 'withMaven()' step " +
+                            "and not found on the build agent but '" + mvnwScript + "' script found in the workspace.");
+                } else {
+                    consoleMessage = new StringBuilder("[withMaven] Maven installation not specified in the 'withMaven()' step " +
+                            "and not found on the build agent");
+                }
+            } else {
+                consoleMessage.append(" with executable " + mvnExecPath);
+            }
         }
+
         console.println(consoleMessage.toString());
 
-        if (mvnExecPath == null) {
-            throw new AbortException("Could not find maven executable, please set up a Maven Installation or configure MAVEN_HOME or M2_HOME environment variable");
-        }
-
         LOGGER.log(Level.FINE, "Found exec for maven on: {0}", mvnExecPath);
+        return mvnExecPath;
+    }
+
+    private String obtainMvnExecutableFromMavenInstallation(String mavenInstallationName) throws IOException, InterruptedException {
+
+        MavenInstallation mavenInstallation = null;
+        for (MavenInstallation i : getMavenInstallations()) {
+            if (mavenInstallationName.equals(i.getName())) {
+                mavenInstallation = i;
+                LOGGER.log(Level.FINE, "Found maven installation {0} with installation home {1}", new Object[]{mavenInstallation.getName(), mavenInstallation.getHome()});
+                break;
+            }
+        }
+        if (mavenInstallation == null) {
+            throw new AbortException("Could not find specified Maven installation '" + mavenInstallationName + "'.");
+        }
+        Node node = getComputer().getNode();
+        if (node == null) {
+            throw new AbortException("Could not obtain the Node for the computer: " + getComputer().getName());
+        }
+        mavenInstallation = mavenInstallation.forNode(node, listener).forEnvironment(env);
+        mavenInstallation.buildEnvVars(envOverride);
+        console.println("[withMaven] using Maven installation '" + mavenInstallation.getName() + "'");
+        String mvnExecPath = mavenInstallation.getExecutable(launcher);
+
         return mvnExecPath;
     }
 
@@ -519,7 +557,7 @@ class WithMavenStepExecution extends StepExecution {
      * launcher decorator is used ie. docker.image step
      *
      * @param args command arguments
-     * @return output from the command
+     * @return output from the command or {@code null} if the command returned a non zero code
      * @throws InterruptedException if interrupted
      */
     @Nullable
@@ -543,10 +581,11 @@ class WithMavenStepExecution extends StepExecution {
      * Generates the content of the maven wrapper script
      *
      * @param mvnExec maven executable location
+     * @param mavenConfig config arguments added to the "mvn" command line
      * @return wrapper script content
      * @throws AbortException when problems creating content
      */
-    private String generateMavenWrapperScriptContent(FilePath mvnExec) throws AbortException {
+    private String generateMavenWrapperScriptContent(@Nonnull FilePath mvnExec, @Nonnull String mavenConfig) throws AbortException {
 
         boolean isUnix = Boolean.TRUE.equals(getComputer().isUnix());
 
@@ -556,13 +595,13 @@ class WithMavenStepExecution extends StepExecution {
             String lineSep = "\n";
             script.append("#!/bin/sh -e").append(lineSep);
             script.append("echo ----- withMaven Wrapper script -----").append(lineSep);
-            script.append(mvnExec.getRemote() + " $MAVEN_CONFIG \"$@\"").append(lineSep);
+            script.append("\"" + mvnExec.getRemote() + "\" " + mavenConfig + " \"$@\"").append(lineSep);
 
         } else { // Windows
             String lineSep = "\r\n";
             script.append("@echo off").append(lineSep);
             script.append("echo ----- withMaven Wrapper script -----").append(lineSep);
-            script.append(mvnExec.getRemote() + " %MAVEN_CONFIG% %*").append(lineSep);
+            script.append("\"" + mvnExec.getRemote() + "\" " + mavenConfig + " %*").append(lineSep);
         }
 
         LOGGER.log(Level.FINER, "Generated Maven wrapper script: \n{0}", script);
@@ -628,7 +667,9 @@ class WithMavenStepExecution extends StepExecution {
 
         // Settings from Config File Provider
         if (StringUtils.isNotEmpty(step.getMavenSettingsConfig())) {
-            console.format("[withMaven] use Maven settings provided by the Jenkins Managed Configuration File '%s' %n", step.getMavenSettingsConfig());
+            if (LOGGER.isLoggable(Level.FINE)) {
+                console.format("[withMaven] using Maven settings provided by the Jenkins Managed Configuration File '%s' %n", step.getMavenSettingsConfig());
+            }
             settingsFromConfig(step.getMavenSettingsConfig(), settingsDest, credentials);
             envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
             return settingsDest.getRemote();
@@ -641,21 +682,43 @@ class WithMavenStepExecution extends StepExecution {
 
             if ((settings = ws.child(settingsPath)).exists()) {
                 // settings file residing on the agent
-                console.format("[withMaven] use Maven settings provided on the build agent '%s' %n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying maven settings file from build agent {0} to {1}", new Object[]{settings, settingsDest});
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    console.format("[withMaven] using Maven settings provided on the build agent '%s' %n", settingsPath);
+                    LOGGER.log(Level.FINE, "Copying maven settings file from build agent {0} to {1}", new Object[] { settings, settingsDest });
+                }
                 settings.copyTo(settingsDest);
+                envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
+                return settingsDest.getRemote();
             } else {
                 throw new AbortException("Could not find file '" + settings + "' on the build agent");
             }
-            envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
-            return settingsDest.getRemote();
         }
 
-        // Settings provided by the global maven configuration
-        SettingsProvider settingsProvider = GlobalMavenConfig.get().getSettingsProvider();
+        SettingsProvider settingsProvider;
+
+        MavenConfigFolderOverrideProperty overrideProperty = getMavenConfigOverrideProperty();
+        StringBuilder mavenSettingsLog=new StringBuilder();
+
+        if (overrideProperty != null && overrideProperty.getSettings() != null) {
+            // Settings overriden by a folder property
+            if(LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("[withMaven] using overriden Maven settings by folder '").append(overrideProperty.getOwner().getDisplayName()).append("'. ");
+            }
+            settingsProvider = overrideProperty.getSettings();
+        } else {
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("[withMaven] using Maven settings provided by the Jenkins global configuration. ");
+            }
+            // Settings provided by the global maven configuration
+            settingsProvider = GlobalMavenConfig.get().getSettingsProvider();
+        }
+
         if (settingsProvider instanceof MvnSettingsProvider) {
             MvnSettingsProvider mvnSettingsProvider = (MvnSettingsProvider) settingsProvider;
-            console.format("[withMaven] use Maven settings provided by the Jenkins global configuration '%s' %n", mvnSettingsProvider.getSettingsConfigId());
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Config File Provider maven settings file '").append(mvnSettingsProvider.getSettingsConfigId()).append("'");
+                console.println(mavenSettingsLog);
+            }
             settingsFromConfig(mvnSettingsProvider.getSettingsConfigId(), settingsDest, credentials);
             envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
             return settingsDest.getRemote();
@@ -665,22 +728,51 @@ class WithMavenStepExecution extends StepExecution {
             FilePath settings;
             if ((settings = ws.child(settingsPath)).exists()) {
                 // Settings file residing on the agent
-                console.format("[withMaven] use Maven settings provided by the Jenkins global configuration on the build agent '%s' %n", settingsPath);
                 settings.copyTo(settingsDest);
+                envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    mavenSettingsLog.append("Maven settings on the build agent'").append(settingsPath).append("'");
+                    console.println(mavenSettingsLog);
+                }
+                return settingsDest.getRemote();
             } else {
                 throw new AbortException("Could not find file provided by the Jenkins global configuration '" + settings + "' on the build agent");
             }
-            envOverride.put("MVN_SETTINGS", settingsDest.getRemote());
-            return settingsDest.getRemote();
+
         } else if (settingsProvider instanceof DefaultSettingsProvider) {
             // do nothing
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Maven settings defined by 'DefaultSettingsProvider', NOT overriding it.");
+                console.println(mavenSettingsLog);
+            }
         } else if (settingsProvider == null) {
             // should not happen according to the source code of jenkins.mvn.MavenConfig.getSettingsProvider() in jenkins-core 2.7
             // do nothing
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Maven settings are null. NO settings will be defined.");
+                console.println(mavenSettingsLog);
+            }
         } else {
             console.println("[withMaven] Ignore unsupported Maven SettingsProvider " + settingsProvider);
         }
 
+        return null;
+    }
+
+    @CheckForNull
+    private MavenConfigFolderOverrideProperty getMavenConfigOverrideProperty() {
+        Job<?, ?> job = build.getParent(); // Get the job
+
+        // Iterate until we find an override or until we reach the top. We need it to be an item to be able to do
+        // getParent, AbstractFolder which has the properties is also an Item
+        for (ItemGroup<?> group = job.getParent(); group != null && group instanceof Item && !(group instanceof Jenkins); group = ((Item) group).getParent()) {
+            if (group instanceof AbstractFolder) {
+                MavenConfigFolderOverrideProperty mavenConfigProperty = ((AbstractFolder<?>) group).getProperties().get(MavenConfigFolderOverrideProperty.class);
+                if (mavenConfigProperty != null && mavenConfigProperty.isOverride()) {
+                    return mavenConfigProperty;
+                }
+            }
+        }
         return null;
     }
 
@@ -700,7 +792,9 @@ class WithMavenStepExecution extends StepExecution {
 
         // Global settings from Config File Provider
         if (StringUtils.isNotEmpty(step.getGlobalMavenSettingsConfig())) {
-            console.format("[withMaven] use Maven global settings provided by the Jenkins Managed Configuration File '%s' %n", step.getGlobalMavenSettingsConfig());
+            if (LOGGER.isLoggable(Level.FINE)) {
+                console.format("[withMaven] using Maven global settings provided by the Jenkins Managed Configuration File '%s' %n", step.getGlobalMavenSettingsConfig());
+            }
             globalSettingsFromConfig(step.getGlobalMavenSettingsConfig(), settingsDest, credentials);
             envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
             return settingsDest.getRemote();
@@ -712,23 +806,47 @@ class WithMavenStepExecution extends StepExecution {
             FilePath settings;
             if ((settings = ws.child(settingsPath)).exists()) {
                 // Global settings file residing on the agent
-                console.format("[withMaven] use Maven global settings provided on the build agent '%s' %n", settingsPath);
-                LOGGER.log(Level.FINE, "Copying maven global settings file from build agent {0} to {1}", new Object[]{settings, settingsDest});
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    console.format("[withMaven] using Maven global settings provided on the build agent '%s' %n", settingsPath);
+                    LOGGER.log(Level.FINE, "Copying maven global settings file from build agent {0} to {1}", new Object[] { settings, settingsDest });
+                }
                 settings.copyTo(settingsDest);
+                envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
+                return settingsDest.getRemote();
             } else {
                 throw new AbortException("Could not find file '" + settings + "' on the build agent");
             }
-            envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
-            return settingsDest.getRemote();
         }
 
         // Settings provided by the global maven configuration
-        GlobalSettingsProvider globalSettingsProvider = GlobalMavenConfig.get().getGlobalSettingsProvider();
+        GlobalSettingsProvider globalSettingsProvider;
+        MavenConfigFolderOverrideProperty overrideProperty = getMavenConfigOverrideProperty();
+
+        StringBuilder mavenSettingsLog = new StringBuilder();
+        if (overrideProperty == null || overrideProperty.getGlobalSettings() == null) {
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("[withMaven] using Maven global settings provided by the Jenkins global configuration. ");
+            }
+            // Settings provided by the global maven configuration
+            globalSettingsProvider = GlobalMavenConfig.get().getGlobalSettingsProvider();
+        } else {
+            // Settings overriden by a folder property
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("[withMaven] using overriden Maven global settings by folder '").append(overrideProperty.getOwner().getDisplayName()).append("'. ");
+            }
+            globalSettingsProvider = overrideProperty.getGlobalSettings();
+        }
+
         if (globalSettingsProvider instanceof MvnGlobalSettingsProvider) {
             MvnGlobalSettingsProvider mvnGlobalSettingsProvider = (MvnGlobalSettingsProvider) globalSettingsProvider;
-            console.format("[withMaven] use Maven global settings provided by the Jenkins global configuration '%s' %n", mvnGlobalSettingsProvider.getSettingsConfigId());
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Config File Provider maven global settings file '").append(mvnGlobalSettingsProvider.getSettingsConfigId()).append("'");
+            }
             globalSettingsFromConfig(mvnGlobalSettingsProvider.getSettingsConfigId(), settingsDest, credentials);
             envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
+            if (LOGGER.isLoggable(Level.FINE)) {
+                console.println(mavenSettingsLog);
+            }
             return settingsDest.getRemote();
         } else if (globalSettingsProvider instanceof FilePathGlobalSettingsProvider) {
             FilePathGlobalSettingsProvider filePathGlobalSettingsProvider = (FilePathGlobalSettingsProvider) globalSettingsProvider;
@@ -736,18 +854,31 @@ class WithMavenStepExecution extends StepExecution {
             FilePath settings;
             if ((settings = ws.child(settingsPath)).exists()) {
                 // Global settings file residing on the agent
-                console.format("[withMaven] use Maven global settings provided by the Jenkins global configuration on the build agent '%s' %n", settingsPath);
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    mavenSettingsLog.append("Maven global settings on the build agent '").append(settingsPath).append("'");
+                }
                 settings.copyTo(settingsDest);
+                envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    console.println(mavenSettingsLog);
+                }
+                return settingsDest.getRemote();
             } else {
                 throw new AbortException("Could not find file provided by the Jenkins global configuration '" + settings + "' on the build agent");
             }
-            envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
-            return settingsDest.getRemote();
         } else if (globalSettingsProvider instanceof DefaultGlobalSettingsProvider) {
             // do nothing
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Maven global settings defined by 'DefaultSettingsProvider', NOT overriding it.");
+                console.println(mavenSettingsLog);
+            }
         } else if (globalSettingsProvider == null) {
             // should not happen according to the source code of jenkins.mvn.GlobalMavenConfig.getGlobalSettingsProvider() in jenkins-core 2.7
             // do nothing
+            if (LOGGER.isLoggable(Level.FINE)) {
+                mavenSettingsLog.append("Maven global settings are null. NO settings will be defined.");
+                console.println(mavenSettingsLog);
+            }
         } else {
             console.println("[withMaven] Ignore unsupported Maven GlobalSettingsProvider " + globalSettingsProvider);
         }
@@ -794,13 +925,17 @@ class WithMavenStepExecution extends StepExecution {
             String mavenSettingsFileContent;
             if (resolvedCredentials.isEmpty()) {
                 mavenSettingsFileContent = mavenSettingsConfig.content;
-                console.println("[withMaven] use Maven settings.xml '" + mavenSettingsConfig.id + "' with NO Maven servers credentials provided by Jenkins");
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    console.println("[withMaven] using Maven settings.xml '" + mavenSettingsConfig.id + "' with NO Maven servers credentials provided by Jenkins");
+                }
             } else {
                 List<String> tempFiles = new ArrayList<String>();
                 mavenSettingsFileContent = CredentialsHelper.fillAuthentication(mavenSettingsConfig.content, mavenSettingsConfig.isReplaceAll, resolvedCredentials, tempBinDir, tempFiles);
-                console.println("[withMaven] use Maven settings.xml '" + mavenSettingsConfig.id + "' with Maven servers credentials provided by Jenkins " +
-                        "(replaceAll: " + mavenSettingsConfig.isReplaceAll + "): " +
-                        Joiner.on(", ").skipNulls().join(Iterables.transform(resolvedCredentials.entrySet(), new MavenServerToCredentialsMappingToStringFunction())));
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    console.println("[withMaven] using Maven settings.xml '" + mavenSettingsConfig.id + "' with Maven servers credentials provided by Jenkins " +
+                            "(replaceAll: " + mavenSettingsConfig.isReplaceAll + "): " +
+                            Joiner.on(", ").skipNulls().join(Iterables.transform(resolvedCredentials.entrySet(), new MavenServerToCredentialsMappingToStringFunction())));
+                }
             }
 
             mavenSettingsFile.write(mavenSettingsFileContent, getComputer().getDefaultCharset().name());
@@ -848,12 +983,12 @@ class WithMavenStepExecution extends StepExecution {
             String mavenGlobalSettingsFileContent;
             if (resolvedCredentials.isEmpty()) {
                 mavenGlobalSettingsFileContent = mavenGlobalSettingsConfig.content;
-                console.println("[withMaven] use Maven global settings.xml '" + mavenGlobalSettingsConfig.id + "' with NO Maven servers credentials provided by Jenkins");
+                console.println("[withMaven] using Maven global settings.xml '" + mavenGlobalSettingsConfig.id + "' with NO Maven servers credentials provided by Jenkins");
 
             } else {
                 List<String> tempFiles = new ArrayList<String>();
                 mavenGlobalSettingsFileContent = CredentialsHelper.fillAuthentication(mavenGlobalSettingsConfig.content, mavenGlobalSettingsConfig.isReplaceAll, resolvedCredentials, tempBinDir, tempFiles);
-                console.println("[withMaven] use Maven global settings.xml '" + mavenGlobalSettingsConfig.id + "' with Maven servers credentials provided by Jenkins " +
+                console.println("[withMaven] using Maven global settings.xml '" + mavenGlobalSettingsConfig.id + "' with Maven servers credentials provided by Jenkins " +
                         "(replaceAll: " + mavenGlobalSettingsConfig.isReplaceAll + "): " +
                         Joiner.on(", ").skipNulls().join(Iterables.transform(resolvedCredentials.entrySet(), new MavenServerToCredentialsMappingToStringFunction())));
 
@@ -894,21 +1029,25 @@ class WithMavenStepExecution extends StepExecution {
     /**
      * Callback to cleanup tmp script after finishing the job
      */
-    private static class WorkspaceCleanupCallback extends BodyExecutionCallback.TailCall {
+    private static class WithMavenStepExecutionCallBack extends BodyExecutionCallback.TailCall {
         private final FilePath tempBinDir;
+
+        private final MavenPublisherStrategy mavenPublisherStrategy;
 
         private final List<MavenPublisher> options;
 
         private final MavenSpyLogProcessor mavenSpyLogProcessor = new MavenSpyLogProcessor();
 
-        public WorkspaceCleanupCallback(@Nonnull FilePath tempBinDir, @Nonnull List<MavenPublisher> options) {
+        public WithMavenStepExecutionCallBack(@Nonnull FilePath tempBinDir, @Nonnull List<MavenPublisher> options,
+                                              @Nonnull MavenPublisherStrategy mavenPublisherStrategy) {
             this.tempBinDir = tempBinDir;
             this.options = options;
+            this.mavenPublisherStrategy = mavenPublisherStrategy;
         }
 
         @Override
         protected void finished(StepContext context) throws Exception {
-            mavenSpyLogProcessor.processMavenSpyLogs(context, tempBinDir, options);
+            mavenSpyLogProcessor.processMavenSpyLogs(context, tempBinDir, options, mavenPublisherStrategy);
 
             try {
                 tempBinDir.deleteRecursive();
@@ -932,7 +1071,7 @@ class WithMavenStepExecution extends StepExecution {
      * @return maven installations on this instance
      */
     private static MavenInstallation[] getMavenInstallations() {
-        return Jenkins.getActiveInstance().getDescriptorByType(Maven.DescriptorImpl.class).getInstallations();
+        return Jenkins.getInstance().getDescriptorByType(Maven.DescriptorImpl.class).getInstallations();
     }
 
     @Override
@@ -955,7 +1094,7 @@ class WithMavenStepExecution extends StepExecution {
         }
 
         String node = null;
-        Jenkins j = Jenkins.getActiveInstance();
+        Jenkins j = Jenkins.getInstance();
 
         for (Computer c : j.getComputers()) {
             if (c.getChannel() == launcher.getChannel()) {

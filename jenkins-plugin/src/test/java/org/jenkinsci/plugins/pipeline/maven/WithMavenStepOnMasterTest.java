@@ -23,29 +23,35 @@
  */
 package org.jenkinsci.plugins.pipeline.maven;
 
-import static org.junit.Assert.*;
-import static org.hamcrest.CoreMatchers.*;
 
+import static org.hamcrest.CoreMatchers.hasItems;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.junit.Assert.assertThat;
+
+import java.io.File;
+import java.util.Collection;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.Map;
+
+
+import com.cloudbees.hudson.plugins.folder.Folder;
 import hudson.model.Fingerprint;
 import hudson.model.Result;
 import hudson.plugins.tasks.TasksResultAction;
 import hudson.tasks.Fingerprinter;
-import hudson.tasks.Maven;
 import hudson.tasks.junit.TestResultAction;
-import jenkins.mvn.DefaultGlobalSettingsProvider;
-import jenkins.mvn.DefaultSettingsProvider;
 import jenkins.mvn.FilePathGlobalSettingsProvider;
 import jenkins.mvn.FilePathSettingsProvider;
 import jenkins.mvn.GlobalMavenConfig;
-import jenkins.plugins.git.GitSampleRepoRule;
-import jenkins.scm.impl.mock.GitSampleRepoRuleUtils;
 import org.apache.commons.io.FileUtils;
-import org.jenkinsci.Symbol;
 import org.jenkinsci.plugins.configfiles.GlobalConfigFiles;
 import org.jenkinsci.plugins.configfiles.maven.GlobalMavenSettingsConfig;
-import org.jenkinsci.plugins.configfiles.maven.MavenSettingsConfig;
 import org.jenkinsci.plugins.configfiles.maven.job.MvnGlobalSettingsProvider;
 import org.jenkinsci.plugins.configfiles.maven.job.MvnSettingsProvider;
+import org.jenkinsci.plugins.configfiles.maven.MavenSettingsConfig;
 import org.jenkinsci.plugins.pipeline.maven.publishers.FindbugsAnalysisPublisher;
 import org.jenkinsci.plugins.pipeline.maven.publishers.GeneratedArtifactsPublisher;
 import org.jenkinsci.plugins.pipeline.maven.publishers.JunitTestsPublisher;
@@ -53,25 +59,34 @@ import org.jenkinsci.plugins.pipeline.maven.publishers.TasksScannerPublisher;
 import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
 import org.jenkinsci.plugins.workflow.job.WorkflowJob;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
+import org.jenkinsci.Symbol;
+import org.junit.After;
 import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Rule;
 import org.junit.Test;
-import org.jvnet.hudson.test.BuildWatcher;
-import org.jvnet.hudson.test.ExtendedToolInstallations;
-import org.jvnet.hudson.test.JenkinsRule;
+import org.jvnet.hudson.test.Issue;
 
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Collection;
-import java.util.Map;
+
 
 /**
  * TODO migrate to {@link WithMavenStepTest} once we have implemented a GitRepoRule that can be used on remote agents
  */
 public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
+
+    Logger logger;
+    Level savedLevel;
+
+    @Before
+    public void before() {
+        // Many log messages checked here are not logged if we are not in FINE level.
+        logger = Logger.getLogger(WithMavenStepExecution.class.getName());
+        savedLevel = logger.getLevel();
+        logger.setLevel(Level.FINE);
+    }
+
+    @After
+    public void after() {
+        logger.setLevel(savedLevel);
+    }
 
     @Test
     public void maven_build_on_master_with_specified_maven_installation_succeeds() throws Exception {
@@ -89,7 +104,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
         WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
 
         // verify provided Maven is used
-        jenkinsRule.assertLogContains("use Maven installation 'apache-maven-3.5.0'", build);
+        jenkinsRule.assertLogContains("using Maven installation 'apache-maven-3.5.0'", build);
 
         // verify .pom is archived and fingerprinted
         // "[withMaven] Archive ... under jenkins/mvn/test/mono-module-maven-app/0.1-SNAPSHOT/mono-module-maven-app-0.1-SNAPSHOT.pom"
@@ -133,7 +148,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
 
         // verify Maven installation provided by the build agent is used
         // can be either "by the build agent with executable..." or "by the build agent with the environment variable MAVEN_HOME=..."
-        jenkinsRule.assertLogContains("[withMaven] use Maven installation provided by the build agent with", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven installation provided by the build agent with", build);
 
         // verify .pom is archived and fingerprinted
         // "[withMaven] Archive ... under jenkins/mvn/test/mono-module-maven-app/0.1-SNAPSHOT/mono-module-maven-app-0.1-SNAPSHOT.pom"
@@ -164,6 +179,47 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
         jenkinsRule.assertLogContains("[withMaven] openTasksPublisher - Scan Tasks for Maven artifact jenkins.mvn.test:mono-module-maven-app:0.1-SNAPSHOT", build);
         TasksResultAction tasksResultAction = build.getAction(TasksResultAction.class);
         assertThat(tasksResultAction.getProjectActions().size(), is(1));
+    }
+
+    @Issue("JENKINS-48264")
+    @Test
+    public void maven_build_jar_project_with_whitespace_char_in_name() throws Exception {
+        loadMavenJarProjectInGitRepo(this.gitRepoRule);
+
+        String pipelineScript = "node('master') {\n" +
+                "    git($/" + gitRepoRule.toString() + "/$)\n" +
+                "    withMaven() {\n" +
+                "        sh 'mvn help:effective-settings'\n" +
+                "    }\n" +
+                "}";
+
+        String mavenSettings =                 "<?xml version='1.0' encoding='UTF-8'?>\n" +
+                "<settings \n" +
+                "        xmlns='http://maven.apache.org/SETTINGS/1.0.0'\n" +
+                "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'\n" +
+                "        xsi:schemaLocation='http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd'>\n" +
+                "    <servers>\n" +
+                "    	<server>\n" +
+                "	        <id>id-settings-test-through-config-file-provider</id>\n" +
+                "	    </server>\n" +
+                "    </servers>\n" +
+                "</settings>\n";
+        MavenSettingsConfig mavenSettingsConfig = new MavenSettingsConfig("maven-config-test", "maven-config-test", "", mavenSettings, false, null);
+
+        GlobalConfigFiles.get().save(mavenSettingsConfig);
+        GlobalMavenConfig.get().setSettingsProvider(new MvnSettingsProvider(mavenSettingsConfig.id));
+
+
+        try {
+            WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build on master with spaces");
+            pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
+            WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
+            jenkinsRule.assertLogContains("[withMaven] using Maven settings provided by the Jenkins global configuration", build);
+            jenkinsRule.assertLogContains("<id>id-settings-test-through-config-file-provider</id>", build);
+        } finally {
+            GlobalMavenConfig.get().setSettingsProvider(null);
+        }
+
     }
 
     @Test
@@ -209,30 +265,37 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
 
     private void maven_build_jar_project_on_master_with_disabled_publisher_param_succeeds(MavenPublisher.DescriptorImpl descriptor, String symbol, boolean disabled) throws Exception {
 
-        String displayName = descriptor.getDisplayName();
+        Logger logger = Logger.getLogger(MavenSpyLogProcessor.class.getName());
+        Level level = logger.getLevel();
+        logger.setLevel(Level.FINE);
+        try {
+            String displayName = descriptor.getDisplayName();
 
-        Symbol symbolAnnotation = descriptor.getClass().getAnnotation(Symbol.class);
-        String[] symbols = symbolAnnotation.value();
-        assertThat(new String[]{symbol},  is(symbols));
+            Symbol symbolAnnotation = descriptor.getClass().getAnnotation(Symbol.class);
+            String[] symbols = symbolAnnotation.value();
+            assertThat(new String[]{symbol}, is(symbols));
 
-        loadMavenJarProjectInGitRepo(this.gitRepoRule);
+            loadMavenJarProjectInGitRepo(this.gitRepoRule);
 
-        String pipelineScript = "node('master') {\n" +
-                "    git($/" + gitRepoRule.toString() + "/$)\n" +
-                "    withMaven(options:[" + symbol + "(disabled:" + disabled + ")]) {\n" +
-                "        sh 'mvn package verify'\n" +
-                "    }\n" +
-                "}";
+            String pipelineScript = "node('master') {\n" +
+                    "    git($/" + gitRepoRule.toString() + "/$)\n" +
+                    "    withMaven(options:[" + symbol + "(disabled:" + disabled + ")]) {\n" +
+                    "        sh 'mvn package verify'\n" +
+                    "    }\n" +
+                    "}";
 
-        WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-" + symbol + "-publisher-disabled-" + disabled);
-        pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
-        WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
+            WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-" + symbol + "-publisher-disabled-" + disabled);
+            pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
+            WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
 
-        String message = "[withMaven] Skip '" + displayName + "' disabled by configuration";
-        if (disabled) {
-            jenkinsRule.assertLogContains(message, build);
-        } else {
-            jenkinsRule.assertLogNotContains(message, build);
+            String message = "[withMaven] Skip '" + displayName + "' disabled by configuration";
+            if (disabled) {
+                jenkinsRule.assertLogContains(message, build);
+            } else {
+                jenkinsRule.assertLogNotContains(message, build);
+            }
+        } finally {
+            logger.setLevel(level);
         }
     }
 
@@ -287,7 +350,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
 
         // verify Maven installation provided by the build agent is used
         // can be either "by the build agent with executable..." or "by the build agent with the environment variable MAVEN_HOME=..."
-        jenkinsRule.assertLogContains("[withMaven] use Maven installation provided by the build agent with", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven installation provided by the build agent with", build);
 
         // verify .pom is archived and fingerprinted
         jenkinsRule.assertLogContains("under jenkins/mvn/test/maven-jar-with-flattened-pom/0.1-SNAPSHOT/maven-jar-with-flattened-pom-0.1-SNAPSHOT.pom", build);
@@ -326,7 +389,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
 
         // verify Maven installation provided by the build agent is used
         // can be either "by the build agent with executable..." or "by the build agent with the environment variable MAVEN_HOME=..."
-        jenkinsRule.assertLogContains("[withMaven] use Maven installation provided by the build agent with", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven installation provided by the build agent with", build);
 
         // verify .pom is archived and fingerprinted
         jenkinsRule.assertLogContains("under jenkins/mvn/test/test-jenkins-hpi/0.1-SNAPSHOT/test-jenkins-hpi-0.1-SNAPSHOT.pom", build);
@@ -366,7 +429,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
 
         // verify Maven installation provided by the build agent is used
         // can be either "by the build agent with executable..." or "by the build agent with the environment variable MAVEN_HOME=..."
-        jenkinsRule.assertLogContains("[withMaven] use Maven installation provided by the build agent with", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven installation provided by the build agent with", build);
 
         // verify .pom is archived and fingerprinted
         jenkinsRule.assertLogContains("under jenkins/mvn/test/maven-test-plugin/1.0-SNAPSHOT/maven-test-plugin-1.0-SNAPSHOT.pom", build);
@@ -469,7 +532,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-global-settings-defined-in-jenkins-global-config");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven global settings provided by the Jenkins global configuration", build);
+            jenkinsRule.assertLogContains("[withMaven] using Maven global settings provided by the Jenkins global configuration", build);
             jenkinsRule.assertLogContains("<id>id-global-settings-test</id>", build);
         } finally {
             GlobalMavenConfig.get().setGlobalSettingsProvider(null);
@@ -477,9 +540,9 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
     }
 
     @Test
-    public void maven_global_settings_path_defined_through_jenkins_global_config_and_config_file_provider() throws Exception {
+    public void maven_global_settings_defined_through_jenkins_global_config_and_config_file_provider() throws Exception {
 
-        String mavenGlobalSettings =                 "<?xml version='1.0' encoding='UTF-8'?>\n" +
+        String mavenGlobalSettings = "<?xml version='1.0' encoding='UTF-8'?>\n" +
                 "<settings \n" +
                 "        xmlns='http://maven.apache.org/SETTINGS/1.0.0'\n" +
                 "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'\n" +
@@ -518,8 +581,67 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-global-settings-defined-in-jenkins-global-config-with-config-file-provider");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven global settings provided by the Jenkins global configuration", build);
+            jenkinsRule.assertLogContains("[withMaven] using Maven global settings provided by the Jenkins global configuration", build);
             jenkinsRule.assertLogContains("<id>id-global-settings-test-from-config-file-provider</id>", build);
+        } finally {
+            GlobalMavenConfig.get().setGlobalSettingsProvider(null);
+            GlobalConfigFiles.get().remove(mavenGlobalSettingsConfig.id);
+        }
+    }
+
+    @Test
+    public void maven_global_settings_defined_through_folder_config_and_config_file_provider() throws Exception {
+
+        String mavenGlobalSettings = "<?xml version='1.0' encoding='UTF-8'?>\n" +
+                "<settings \n" +
+                "        xmlns='http://maven.apache.org/SETTINGS/1.0.0'\n" +
+                "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'\n" +
+                "        xsi:schemaLocation='http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd'>\n" +
+                "    <servers>\n" +
+                "       <server>\n" +
+                "           <id>id-global-settings-test-from-config-file-provider-on-a-folder</id>\n" +
+                "       </server>\n" +
+                "    </servers>\n" +
+                "</settings>\n";
+
+        GlobalMavenSettingsConfig mavenGlobalSettingsConfig = new GlobalMavenSettingsConfig("maven-global-config-test-folder", "maven-global-config-test-folder", "",
+            mavenGlobalSettings);
+
+        String pipelineScript = "node () {\n" +
+                "    writeFile file: 'pom.xml', text: '''<?xml version='1.0' encoding='UTF-8'?>\n" +
+                "<project\n" +
+                "        xmlns='http://maven.apache.org/POM/4.0.0' \n" +
+                "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' \n" +
+                "        xsi:schemaLocation='http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd'>\n" +
+                "    <modelVersion>4.0.0</modelVersion>\n" +
+                "    <groupId>com.example</groupId>\n" +
+                "    <artifactId>my-artifact</artifactId>\n" +
+                "    <version>1.0.0-SNAPSHOT</version>\n" +
+                "    <packaging>pom</packaging>\n" +
+                "</project>'''\n" +
+                "\n" +
+                "    withMaven(maven: 'apache-maven-3.5.0') {\n" +
+                "        sh 'mvn help:effective-settings'\n" +
+                "    }\n" +
+                "}\n";
+
+        GlobalConfigFiles.get().save(mavenGlobalSettingsConfig);
+
+        Folder folder = jenkinsRule.createProject(Folder.class, "folder");
+        MavenConfigFolderOverrideProperty configOverrideProperty = new MavenConfigFolderOverrideProperty();
+        configOverrideProperty.setOverride(true);
+        configOverrideProperty.setGlobalSettings(new MvnGlobalSettingsProvider(mavenGlobalSettingsConfig.id));
+        folder.addProperty(configOverrideProperty);
+
+        try {
+            WorkflowJob pipeline = folder.createProject(WorkflowJob.class,
+                "build-on-master-with-maven-global-settings-defined-in-jenkins-global-config-with-config-file-provider");
+            pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
+            WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
+            jenkinsRule.assertLogContains(
+                "[withMaven] using overriden Maven global settings by folder 'folder'. Config File Provider maven global settings file 'maven-global-config-test-folder'",
+                build);
+            jenkinsRule.assertLogContains("<id>id-global-settings-test-from-config-file-provider-on-a-folder</id>", build);
         } finally {
             GlobalMavenConfig.get().setGlobalSettingsProvider(null);
             GlobalConfigFiles.get().remove(mavenGlobalSettingsConfig.id);
@@ -562,7 +684,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-global-settings-defined-in-pipeline");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven global settings provided on the build agent", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven global settings provided on the build agent", build);
             jenkinsRule.assertLogContains("<id>id-global-settings-test</id>", build);
 
     }
@@ -606,7 +728,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
         WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-settings-defined-in-pipeline");
         pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
         WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-        jenkinsRule.assertLogContains("[withMaven] use Maven settings provided on the build agent", build);
+        jenkinsRule.assertLogContains("[withMaven] using Maven settings provided on the build agent", build);
         jenkinsRule.assertLogContains("<id>id-settings-test</id>", build);
 
     }
@@ -652,7 +774,7 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-settings-defined-in-jenkins-global-config");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven settings provided by the Jenkins global configuration", build);
+            jenkinsRule.assertLogContains("[withMaven] using Maven settings provided by the Jenkins global configuration", build);
             jenkinsRule.assertLogContains("<id>id-settings-test</id>", build);
         } finally {
             GlobalMavenConfig.get().setSettingsProvider(null);
@@ -700,10 +822,65 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-settings-defined-in-jenkins-global-config-with-config-file-provider");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven settings provided by the Jenkins global configuration", build);
+            jenkinsRule.assertLogContains("[withMaven] using Maven settings provided by the Jenkins global configuration", build);
             jenkinsRule.assertLogContains("<id>id-settings-test-through-config-file-provider</id>", build);
         } finally {
             GlobalMavenConfig.get().setSettingsProvider(null);
+        }
+    }
+
+    @Test
+    public void maven_settings_defined_through_folder_config_and_config_file_provider() throws Exception {
+
+        String mavenSettings = "<?xml version='1.0' encoding='UTF-8'?>\n" +
+                "<settings \n" +
+                "        xmlns='http://maven.apache.org/SETTINGS/1.0.0'\n" +
+                "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance'\n" +
+                "        xsi:schemaLocation='http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd'>\n" +
+                "    <servers>\n" +
+                "       <server>\n" +
+                "           <id>id-settings-test-through-config-file-provider-on-a-folder</id>\n" +
+                "       </server>\n" +
+                "    </servers>\n" +
+                "</settings>\n";
+        MavenSettingsConfig mavenSettingsConfig = new MavenSettingsConfig("maven-config-test-folder", "maven-config-test-folder", "", mavenSettings, false, null);
+
+        String pipelineScript = "node () {\n" +
+                "    writeFile file: 'pom.xml', text: '''<?xml version='1.0' encoding='UTF-8'?>\n" +
+                "<project\n" +
+                "        xmlns='http://maven.apache.org/POM/4.0.0' \n" +
+                "        xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' \n" +
+                "        xsi:schemaLocation='http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd'>\n" +
+                "    <modelVersion>4.0.0</modelVersion>\n" +
+                "    <groupId>com.example</groupId>\n" +
+                "    <artifactId>my-artifact</artifactId>\n" +
+                "    <version>1.0.0-SNAPSHOT</version>\n" +
+                "    <packaging>pom</packaging>\n" +
+                "</project>'''\n" +
+                "\n" +
+                "    withMaven(maven: 'apache-maven-3.5.0') {\n" +
+                "        sh 'mvn help:effective-settings'\n" +
+                "    }\n" +
+                "}\n";
+        GlobalConfigFiles.get().save(mavenSettingsConfig);
+
+        Folder folder = jenkinsRule.createProject(Folder.class, "folder");
+        MavenConfigFolderOverrideProperty configOverrideProperty = new MavenConfigFolderOverrideProperty();
+        configOverrideProperty.setOverride(true);
+        GlobalMavenConfig globalMavenConfig = GlobalMavenConfig.get();
+        configOverrideProperty.setGlobalSettings(globalMavenConfig.getGlobalSettingsProvider());
+        configOverrideProperty.setSettings(new MvnSettingsProvider(mavenSettingsConfig.id));
+        folder.addProperty(configOverrideProperty);
+
+        try {
+            WorkflowJob pipeline = folder.createProject(WorkflowJob.class, "build-on-master-with-maven-settings-defined-in-jenkins-global-config-with-config-file-provider");
+            pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
+            WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
+            jenkinsRule.assertLogContains("[withMaven] using overriden Maven settings by folder 'folder'. Config File Provider maven settings file 'maven-config-test-folder'",
+                build);
+            jenkinsRule.assertLogContains("<id>id-settings-test-through-config-file-provider-on-a-folder</id>", build);
+        } finally {
+            configOverrideProperty.setOverride(false);
         }
     }
 
@@ -748,10 +925,52 @@ public class WithMavenStepOnMasterTest extends AbstractIntegrationTest {
             WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master-with-maven-global-settings-defined-in-jenkins-global-config-with-config-file-provider");
             pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
             WorkflowRun build = jenkinsRule.assertBuildStatus(Result.SUCCESS, pipeline.scheduleBuild2(0));
-            jenkinsRule.assertLogContains("[withMaven] use Maven settings provided by the Jenkins Managed Configuration File 'maven-config-test-from-pipeline-attribute'", build);
+            jenkinsRule.assertLogContains("[withMaven] using Maven settings provided by the Jenkins Managed Configuration File 'maven-config-test-from-pipeline-attribute'", build);
             jenkinsRule.assertLogContains("<id>id-settings-test-from-pipeline-attribute-and-config-file-provider</id>", build);
         } finally {
             GlobalConfigFiles.get().remove(mavenSettingsConfig.id);
         }
     }
+
+    @Issue("JENKINS-27395")
+    @Test
+    public void maven_build_test_results_by_stage_and_branch() throws Exception {
+        loadMavenJarProjectInGitRepo(this.gitRepoRule);
+
+        String pipelineScript = "stage('first') {\n" +
+                "    parallel(a: {\n" +
+                "        node('master') {\n" +
+                "            git($/" + gitRepoRule.toString() + "/$)\n" +
+                "            withMaven() {\n" +
+                "                sh 'mvn package verify'\n" +
+                "            }\n" +
+                "        }\n" +
+                "    },\n" +
+                "    b: {\n" +
+                "        node('master') {\n" +
+                "            git($/" + gitRepoRule.toString() + "/$)\n" +
+                "            withMaven() {\n" +
+                "                sh 'mvn package verify'\n" +
+                "            }\n" +
+                "        }\n" +
+                "    })\n" +
+                "}";
+
+        WorkflowJob pipeline = jenkinsRule.createProject(WorkflowJob.class, "build-on-master");
+        pipeline.setDefinition(new CpsFlowDefinition(pipelineScript, true));
+        WorkflowRun build = jenkinsRule.buildAndAssertSuccess(pipeline);
+
+        TestResultAction testResultAction = build.getAction(TestResultAction.class);
+        assertThat(testResultAction.getTotalCount(), is(6));
+        assertThat(testResultAction.getFailCount(), is(0));
+
+        /*
+        TODO enable test below when we can bump the junit-plugin to version 1.23+
+        JUnitResultsStepTest.assertStageResults(build, 4, 6, "first");
+
+        JUnitResultsStepTest.assertBranchResults(build, 2, 3, "a", "first");
+        JUnitResultsStepTest.assertBranchResults(build, 2, 3, "b", "first");
+        */
+    }
+
 }

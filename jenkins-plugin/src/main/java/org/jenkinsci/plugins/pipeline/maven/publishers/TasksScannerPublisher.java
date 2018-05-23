@@ -6,11 +6,9 @@ import hudson.Launcher;
 import hudson.model.Run;
 import hudson.model.StreamBuildListener;
 import hudson.model.TaskListener;
-import hudson.plugins.tasks.TasksPublisher;
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.Symbol;
-import org.jenkinsci.plugins.pipeline.maven.MavenPublisher;
-import org.jenkinsci.plugins.pipeline.maven.MavenSpyLogProcessor;
+import org.jenkinsci.plugins.pipeline.maven.MavenArtifact;
 import org.jenkinsci.plugins.pipeline.maven.util.XmlUtils;
 import org.jenkinsci.plugins.workflow.steps.StepContext;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -21,6 +19,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -30,7 +29,7 @@ import javax.annotation.Nonnull;
  * @author <a href="mailto:cleclerc@cloudbees.com">Cyrille Le Clerc</a>
  * @see hudson.plugins.tasks.TasksPublisher
  */
-public class TasksScannerPublisher extends MavenPublisher {
+public class TasksScannerPublisher extends AbstractHealthAwarePublisher {
     private static final Logger LOGGER = Logger.getLogger(TasksScannerPublisher.class.getName());
 
     private static final long serialVersionUID = 1L;
@@ -38,32 +37,32 @@ public class TasksScannerPublisher extends MavenPublisher {
     /**
      * Coma separated high priority task identifiers
      *
-     * @see TasksPublisher#getHigh()
+     * @see hudson.plugins.tasks.TasksPublisher#getHigh()
      */
     private String highPriorityTaskIdentifiers = "";
     /**
-     * @see TasksPublisher#getNormal()
+     * @see hudson.plugins.tasks.TasksPublisher#getNormal()
      */
     private String normalPriorityTaskIdentifiers = "";
     /**
-     * @see TasksPublisher#getLow()
+     * @see hudson.plugins.tasks.TasksPublisher#getLow()
      */
     private String lowPriorityTaskIdentifiers = "";
     /**
-     * @see TasksPublisher#getIgnoreCase()
+     * @see hudson.plugins.tasks.TasksPublisher#getIgnoreCase()
      */
     private boolean ignoreCase = false;
     /**
-     * @see TasksPublisher#getPattern()
+     * @see hudson.plugins.tasks.TasksPublisher#getPattern()
      */
     private String pattern = "";
     /**
-     * @see TasksPublisher#getExcludePattern()
+     * @see hudson.plugins.tasks.TasksPublisher#getExcludePattern()
      */
     private String excludePattern = "";
 
     /**
-     * @see TasksPublisher#getAsRegexp()
+     * @see hudson.plugins.tasks.TasksPublisher#getAsRegexp()
      */
     private boolean asRegexp = false;
 
@@ -121,9 +120,16 @@ public class TasksScannerPublisher extends MavenPublisher {
                 continue;
             }
             Element projectElt = XmlUtils.getUniqueChildElement(executionEvent, "project");
-            MavenSpyLogProcessor.MavenArtifact mavenArtifact = XmlUtils.newMavenArtifact(projectElt);
+            MavenArtifact mavenArtifact = XmlUtils.newMavenArtifact(projectElt);
 
             String sourceDirectory = buildElement.getAttribute("sourceDirectory");
+
+            // JENKINS-44359
+            if (Objects.equals(sourceDirectory, "${project.basedir}/src/main/java")) {
+                if (LOGGER.isLoggable(Level.FINE))
+                    LOGGER.log(Level.FINE, "Skip task scanning for " + XmlUtils.toString(executionEvent));
+                continue;
+            }
 
             String sourceDirectoryRelativePath = XmlUtils.getPathInWorkspace(sourceDirectory, workspace);
 
@@ -135,7 +141,20 @@ public class TasksScannerPublisher extends MavenPublisher {
             }
         }
 
-        TasksPublisher tasksPublisher = new TasksPublisher();
+        if (sourceDirectoriesPatterns.isEmpty()) {
+            if (LOGGER.isLoggable(Level.FINE)) {
+                listener.getLogger().println("[withMaven] openTasksPublisher - no folder to scan");
+            }
+            return;
+        }
+
+        // To avoid duplicates
+        hudson.plugins.tasks.TasksResultAction tasksResult = run.getAction(hudson.plugins.tasks.TasksResultAction.class);
+        if (tasksResult != null) {
+            run.removeAction(tasksResult);
+        }
+
+        hudson.plugins.tasks.TasksPublisher tasksPublisher = new hudson.plugins.tasks.TasksPublisher();
         String pattern = StringUtils.isEmpty(this.pattern)? XmlUtils.join(sourceDirectoriesPatterns, ",") : this.pattern;
         tasksPublisher.setPattern(pattern);
         tasksPublisher.setExcludePattern(StringUtils.trimToNull(this.excludePattern));
@@ -145,6 +164,8 @@ public class TasksScannerPublisher extends MavenPublisher {
         tasksPublisher.setLow(StringUtils.trimToNull(this.lowPriorityTaskIdentifiers));
         tasksPublisher.setIgnoreCase(this.ignoreCase);
         tasksPublisher.setAsRegexp(this.asRegexp);
+
+        setHealthAwarePublisherAttributes(tasksPublisher);
 
         try {
             tasksPublisher.perform(run, workspace, launcher, listener);
@@ -219,7 +240,7 @@ public class TasksScannerPublisher extends MavenPublisher {
 
     @Symbol("openTasksPublisher")
     @Extension
-    public static class DescriptorImpl extends MavenPublisher.DescriptorImpl {
+    public static class DescriptorImpl extends AbstractHealthAwarePublisher.DescriptorImpl {
         @Nonnull
         @Override
         public String getDisplayName() {

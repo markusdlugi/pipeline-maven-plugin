@@ -35,6 +35,7 @@ import java.util.logging.Logger;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import javax.inject.Inject;
 
 /**
  * Trigger downstream pipelines.
@@ -45,6 +46,9 @@ import javax.annotation.Nullable;
 public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRun> {
 
     private final static Logger LOGGER = Logger.getLogger(DownstreamPipelineTriggerRunListener.class.getName());
+    
+    @Inject
+    public GlobalPipelineMavenConfig globalPipelineMavenConfig;
 
     private static Set<WorkflowRun> triggeredBuilds = new HashSet<>();
     
@@ -71,7 +75,7 @@ public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRu
         if(result == null) {
         	result = Result.SUCCESS;
         }
-        if (!GlobalPipelineMavenConfig.getTriggerDownstreamBuildsCriteria().contains(result)) {
+        if (!globalPipelineMavenConfig.getTriggerDownstreamBuildsResultsCriteria().contains(result)) {
             if (LOGGER.isLoggable(Level.FINER)) {
                 listener.getLogger().println("[withMaven] Skip downstream job triggering for upstream build with ignored result status " + upstreamBuild + ": " + result);
             }
@@ -79,7 +83,7 @@ public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRu
         }
 
         WorkflowJob upstreamPipeline = upstreamBuild.getParent();
-        List<String> downstreamPipelines = GlobalPipelineMavenConfig.getDao().listDownstreamJobs(upstreamPipeline.getFullName(), upstreamBuild.getNumber());
+        List<String> downstreamPipelines = globalPipelineMavenConfig.getDao().listDownstreamJobs(upstreamPipeline.getFullName(), upstreamBuild.getNumber());
 
         // Don't trigger myself
         downstreamPipelines.remove(upstreamPipeline.getFullName());
@@ -112,7 +116,7 @@ public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRu
             		}
             		
             		// Skip if this downstream pipeline will be triggered by another one of our downstream pipelines
-                    // That's the case when one of the downstream's transitive upstream is our own downstream
+                // That's the case when one of the downstream's transitive upstream is our own downstream
             		if(downstreamPipelines.contains(transitiveUpstream)) {
             			listener.getLogger().println("[withMaven] Not triggering " + ModelHyperlinkNote.encodeTo(downstreamPipeline) + " because it has dependencies in the downstream project list");
             			continue outer;

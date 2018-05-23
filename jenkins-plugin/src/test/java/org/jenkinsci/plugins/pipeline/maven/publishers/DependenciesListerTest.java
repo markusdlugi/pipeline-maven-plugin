@@ -1,7 +1,8 @@
 package org.jenkinsci.plugins.pipeline.maven.publishers;
 
 import org.hamcrest.CoreMatchers;
-import org.jenkinsci.plugins.pipeline.maven.MavenSpyLogProcessor;
+import org.jenkinsci.plugins.pipeline.maven.MavenArtifact;
+import org.jenkinsci.plugins.pipeline.maven.MavenDependency;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -26,11 +27,11 @@ public class DependenciesListerTest {
 
     @Test
     public void listArtifactDependencies() throws Exception {
-        List<MavenSpyLogProcessor.MavenDependency> mavenArtifacts = DependenciesLister.listDependencies(doc.getDocumentElement(), null);
+        List<MavenDependency> mavenArtifacts = DependenciesLister.listDependencies(doc.getDocumentElement(), null);
         System.out.println(mavenArtifacts);
         Assert.assertThat(mavenArtifacts.size(), CoreMatchers.is(2));
 
-        MavenSpyLogProcessor.MavenArtifact dependencyArtifact = mavenArtifacts.get(0);
+        MavenArtifact dependencyArtifact = mavenArtifacts.get(0);
         Assert.assertThat(dependencyArtifact.artifactId, CoreMatchers.is("spring-test"));
         Assert.assertThat(dependencyArtifact.file, CoreMatchers.is("/path/to/spring-petclinic/spring-test/3.2.16.RELEASE/spring-test-3.2.16.RELEASE.jar"));
 
