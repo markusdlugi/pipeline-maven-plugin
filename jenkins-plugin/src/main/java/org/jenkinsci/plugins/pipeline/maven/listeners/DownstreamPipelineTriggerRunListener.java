@@ -102,7 +102,7 @@ public class DownstreamPipelineTriggerRunListener extends RunListener<WorkflowRu
             // See #46313
             if(downstreamPipeline.getLastBuild() != null) {
             	int downstreamBuildNumber = downstreamPipeline.getLastBuild().getNumber();
-            	Map<String, Integer> transitiveUpstreamPipelines = GlobalPipelineMavenConfig.getDao().listTransitiveUpstreamJobs(downstreamPipelineFullName, downstreamBuildNumber);
+            	Map<String, Integer> transitiveUpstreamPipelines = globalPipelineMavenConfig.getDao().listTransitiveUpstreamJobs(downstreamPipelineFullName, downstreamBuildNumber);
             	for(String transitiveUpstream : transitiveUpstreamPipelines.keySet()) {
             		// Skip if one of the downstream's upstream is already building or in queue
             		// Then it will get triggered anyway by that upstream, we don't need to trigger it again
