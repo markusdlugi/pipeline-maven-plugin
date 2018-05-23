@@ -1,6 +1,7 @@
 package org.jenkinsci.plugins.pipeline.maven.publishers;
 
 import hudson.Extension;
+import hudson.ExtensionList;
 import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.util.ListBoxModel;
@@ -10,7 +11,9 @@ import org.jenkinsci.plugins.pipeline.maven.MavenArtifact;
 import org.jenkinsci.plugins.pipeline.maven.MavenDependency;
 import org.jenkinsci.plugins.pipeline.maven.MavenPublisher;
 import org.jenkinsci.plugins.pipeline.maven.dao.PipelineMavenPluginDao;
+import org.jenkinsci.plugins.pipeline.maven.listeners.DownstreamPipelineTriggerRunListener;
 import org.jenkinsci.plugins.pipeline.maven.util.XmlUtils;
+import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.jenkinsci.plugins.workflow.steps.StepContext;
 import org.kohsuke.stapler.DataBoundConstructor;
 import org.kohsuke.stapler.DataBoundSetter;
@@ -50,6 +53,8 @@ public class PipelineGraphPublisher extends MavenPublisher {
     private boolean includeScopeProvided = true;
 
     private boolean skipDownstreamTriggers;
+    
+    private boolean triggerAfterStep;
 
     /**
      * Lifecycle phase threshold to trigger downstream pipelines, "deploy" or "install" or "package" or ...
@@ -92,6 +97,16 @@ public class PipelineGraphPublisher extends MavenPublisher {
         recordParentProject(parentProjects, generatedArtifacts, run,listener, dao);
         recordDependencies(dependencies, generatedArtifacts, run, listener, dao);
         recordGeneratedArtifacts(generatedArtifacts, executedLifecyclePhases, run, listener, dao);
+      
+        if(triggerAfterStep) {
+            listener.getLogger().println("[withMaven] Triggering after step");
+            DownstreamPipelineTriggerRunListener triggerRunListener = ExtensionList.lookup(DownstreamPipelineTriggerRunListener.class).get(0);
+            if(triggerRunListener == null) {
+                listener.getLogger().println("[withMaven] Unable to get listener!");
+                return;
+            }
+    		    triggerRunListener.onCompleted((WorkflowRun) run, listener);
+        }
     }
 
     protected void recordParentProject(List<MavenArtifact> parentProjects, List<MavenArtifact> generatedArtifacts,
@@ -247,7 +262,8 @@ public class PipelineGraphPublisher extends MavenPublisher {
                 "versions={snapshot:" + isIncludeSnapshotVersions() + ", release:" + isIncludeReleaseVersions() + "}, " +
                 "skipDownstreamTriggers=" + isSkipDownstreamTriggers() + ", " +
                 "lifecycleThreshold=" + getLifecycleThreshold() + ", " +
-                "ignoreUpstreamTriggers=" + isIgnoreUpstreamTriggers() +
+                "ignoreUpstreamTriggers=" + isIgnoreUpstreamTriggers() + ", " +
+                "triggerAfterStep=" + isTriggerAfterStep() + 
                 ']';
     }
 
@@ -314,7 +330,16 @@ public class PipelineGraphPublisher extends MavenPublisher {
         this.skipDownstreamTriggers = skipDownstreamTriggers;
     }
 
-    public boolean isIgnoreUpstreamTriggers() {
+    public boolean isTriggerAfterStep() {
+		return triggerAfterStep;
+	}
+
+    @DataBoundSetter
+	public void setTriggerAfterStep(boolean triggerAfterStep) {
+		this.triggerAfterStep = triggerAfterStep;
+	}
+
+	public boolean isIgnoreUpstreamTriggers() {
         return ignoreUpstreamTriggers;
     }
 

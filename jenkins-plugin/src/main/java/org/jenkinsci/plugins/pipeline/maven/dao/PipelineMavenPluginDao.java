@@ -155,6 +155,7 @@ public interface PipelineMavenPluginDao {
      * List the upstream jobs who generate an artifact that the given build depends on
      * (build identified by the given {@code jobFullName}, {@code buildNumber})
      *
+
      * Doesn't return the passed job in case where a pipeline consumes an artifact it also produces
      *
      * @param jobFullName see {@link Item#getFullName()}
