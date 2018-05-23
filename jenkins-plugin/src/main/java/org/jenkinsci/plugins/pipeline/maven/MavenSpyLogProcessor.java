@@ -41,6 +41,7 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.Serializable;
 import java.util.List;
+import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -58,7 +59,8 @@ public class MavenSpyLogProcessor implements Serializable {
 
     private static final Logger LOGGER = Logger.getLogger(MavenSpyLogProcessor.class.getName());
 
-    public void processMavenSpyLogs(StepContext context, FilePath mavenSpyLogFolder, List<MavenPublisher> options) throws IOException, InterruptedException {
+    public void processMavenSpyLogs(@Nonnull StepContext context, @Nonnull FilePath mavenSpyLogFolder, @Nonnull List<MavenPublisher> options,
+                                    @Nonnull MavenPublisherStrategy publisherStrategy) throws IOException, InterruptedException {
         FilePath[] mavenSpyLogsList = mavenSpyLogFolder.list("maven-spy-*.log");
         LOGGER.log(Level.FINE, "Found {0} maven execution reports in {1}", new Object[]{mavenSpyLogsList.length, mavenSpyLogFolder});
 
@@ -79,7 +81,7 @@ public class MavenSpyLogProcessor implements Serializable {
         for (FilePath mavenSpyLogs : mavenSpyLogsList) {
             try {
                 if (LOGGER.isLoggable(Level.FINE)) {
-                    listener.getLogger().println("[withMaven]  Evaluate Maven Spy logs: " + mavenSpyLogs.getRemote());
+                    listener.getLogger().println("[withMaven] Evaluate Maven Spy logs: " + mavenSpyLogs.getRemote());
                 }
                 InputStream mavenSpyLogsInputStream = mavenSpyLogs.read();
                 if (mavenSpyLogsInputStream == null) {
@@ -94,13 +96,20 @@ public class MavenSpyLogProcessor implements Serializable {
 
                 Element mavenSpyLogsElt = documentBuilder.parse(mavenSpyLogsInputStream).getDocumentElement();
 
-                List<MavenPublisher> mavenPublishers = MavenPublisher.buildPublishersList(options, listener);
+                if (LOGGER.isLoggable(Level.FINE)){
+                    listener.getLogger().println("[withMaven] Maven Publisher Strategy: " + publisherStrategy.getDescription());
+                }
+                List<MavenPublisher> mavenPublishers = publisherStrategy.buildPublishersList(options, listener);
                 for (MavenPublisher mavenPublisher : mavenPublishers) {
                     String skipFileName = mavenPublisher.getDescriptor().getSkipFileName();
                     if (Boolean.TRUE.equals(mavenPublisher.isDisabled())) {
-                        listener.getLogger().println("[withMaven] Skip '" + mavenPublisher.getDescriptor().getDisplayName() + "' disabled by configuration");
+                        if (LOGGER.isLoggable(Level.FINE)) {
+                            listener.getLogger().println("[withMaven] Skip '" + mavenPublisher.getDescriptor().getDisplayName() + "' disabled by configuration");
+                        }
                     } else if (StringUtils.isNotEmpty(skipFileName) && workspace.child(skipFileName).exists()) {
-                        listener.getLogger().println("[withMaven] Skip '" + mavenPublisher.getDescriptor().getDisplayName() + "' disabled by marker file '" + skipFileName + "'");
+                        if (LOGGER.isLoggable(Level.FINE)) {
+                            listener.getLogger().println("[withMaven] Skip '" + mavenPublisher.getDescriptor().getDisplayName() + "' disabled by marker file '" + skipFileName + "'");
+                        }
                     } else {
                         if (LOGGER.isLoggable(Level.FINE)) {
                             listener.getLogger().println("[withMaven] Run '" + mavenPublisher.getDescriptor().getDisplayName() + "'...");
@@ -145,92 +154,6 @@ public class MavenSpyLogProcessor implements Serializable {
                     listener.getLogger().print("[withMaven] Ignore: " + mavenSpyLogsInterruptedLogs.getRemote());
                 }
             }
-        }
-    }
-
-    public static class MavenArtifact {
-        public String groupId, artifactId;
-        /**
-         * Gets the version of this artifact, for example "1.0-20100529-1213". Note that in case of meta versions like
-         * "1.0-SNAPSHOT", the artifact's version depends on the state of the artifact. Artifacts that have been resolved or
-         * deployed will usually have the meta version expanded.
-         *
-         * @see org.eclipse.aether.artifact.Artifact#getVersion()
-         */
-        public String version;
-        /**
-         * Gets the base version of this artifact, for example "1.0-SNAPSHOT". In contrast to the org.eclipse.aether.artifact.Artifact#getVersion(), the
-         * base version will always refer to the unresolved meta version.
-         *
-         * @see org.eclipse.aether.artifact.Artifact#getBaseVersion()
-         */
-        public String baseVersion;
-        public String type, classifier, extension;
-        public String file;
-        public boolean snapshot;
-
-        /**
-         * @see MavenArtifact#version
-         */
-        public String getFileName() {
-            return artifactId + "-" + version + ((classifier == null || classifier.isEmpty()) ? "" : "-" + classifier) + "." + extension;
-        }
-
-        /**
-         * @see MavenArtifact#baseVersion
-         */
-        public String getFileNameWithBaseVersion() {
-            return artifactId + "-" + baseVersion + ((classifier == null || classifier.isEmpty()) ? "" : "-" + classifier) + "." + extension;
-        }
-
-        /**
-         * @see org.apache.maven.artifact.Artifact#getId()
-         */
-        public String getId() {
-            return groupId + ":" + artifactId + ":" + (baseVersion) + ((classifier == null || classifier.isEmpty()) ? "" : ":" + classifier);
-        }
-
-        @Override
-        public String toString() {
-            return "MavenArtifact{" +
-                    groupId + ":" +
-                    artifactId + ":" +
-                    type +
-                    (classifier == null ? "" : ":" + classifier) + ":" +
-                    baseVersion + "(version: " + version + ", snapshot:" + snapshot + ") " +
-                    (file == null ? "" : " " + file) +
-                    '}';
-        }
-    }
-
-    public static class MavenDependency extends MavenArtifact {
-
-        private String scope;
-        public boolean optional;
-
-        @Nonnull
-        public String getScope() {
-            return scope == null ? "compile" : scope;
-        }
-
-        public void setScope(String scope) {
-            this.scope = scope == null || scope.isEmpty() ? null : scope;
-        }
-
-        @Override
-        public String toString() {
-            return "MavenDependency{" +
-                    groupId + ":" +
-                    artifactId + ":" +
-                    type +
-                    (classifier == null ? "" : ":" + classifier) + ":" +
-                    baseVersion + ", " +
-                    "scope: " + scope + ", " +
-                    " optional: " + optional +
-                    " version: " + version +
-                    " snapshot: " + snapshot +
-                    (file == null ? "" : " " + file) +
-                    '}';
         }
     }
 

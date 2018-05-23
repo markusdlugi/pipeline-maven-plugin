@@ -24,8 +24,14 @@
 
 package org.jenkinsci.plugins.pipeline.maven.dao;
 
+import org.jenkinsci.plugins.pipeline.maven.MavenArtifact;
+import org.jenkinsci.plugins.pipeline.maven.MavenDependency;
+
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import javax.annotation.Nonnull;
 
@@ -33,33 +39,49 @@ import javax.annotation.Nonnull;
  * @author <a href="mailto:cleclerc@cloudbees.com">Cyrille Le Clerc</a>
  */
 public class PipelineMavenPluginNullDao implements PipelineMavenPluginDao {
-    @Override
-    public void recordDependency(String jobFullName, int buildNumber, String groupId, String artifactId, String version, String type, String scope, boolean ignoreUpstreamTriggers) {
+    private static Logger LOGGER = Logger.getLogger(PipelineMavenPluginNullDao.class.getName());
 
+    @Override
+    public void recordDependency(String jobFullName, int buildNumber, String groupId, String artifactId, String version, String type, String scope, boolean ignoreUpstreamTriggers, String classifier) {
+        LOGGER.log(Level.INFO, "recordDependency({0}#{1}, {2}:{3}:{4}:{5}, {6}, ignoreUpstreamTriggers:{7}})",
+                new Object[]{jobFullName, buildNumber, groupId, artifactId, version, type, scope, ignoreUpstreamTriggers});
+    }
+
+    @Nonnull
+    @Override
+    public List<MavenDependency> listDependencies(@Nonnull String jobFullName, int buildNumber) {
+        return Collections.emptyList();
     }
 
     @Override
     public void recordParentProject(@Nonnull String jobFullName, int buildNumber, @Nonnull String parentGroupId, @Nonnull String parentArtifactId, @Nonnull String parentVersion, boolean ignoreUpstreamTriggers) {
+        LOGGER.log(Level.INFO, "recordParentProject({0}#{1}, {2}:{3} ignoreUpstreamTriggers:{5}})",
+                new Object[]{jobFullName, buildNumber, parentGroupId, parentArtifactId, parentVersion, ignoreUpstreamTriggers});
 
     }
 
     @Override
-    public void recordGeneratedArtifact(String jobFullName, int buildNumber, String groupId, String artifactId, String version, String type, String baseVersion, boolean skipDownstreamTriggers) {
+    public void recordGeneratedArtifact(String jobFullName, int buildNumber, String groupId, String artifactId, String version, String type, String baseVersion, String repositoryUrl, boolean skipDownstreamTriggers, String extension, String classifier) {
+        LOGGER.log(Level.INFO, "recordGeneratedArtifact({0}#{1}, {2}:{3}:{4}:{5}, version:{6}, repositoryUrl:{7}, skipDownstreamTriggers:{8})",
+                new Object[]{jobFullName, buildNumber, groupId, artifactId, baseVersion, type, version, repositoryUrl, skipDownstreamTriggers});
 
     }
 
     @Override
     public void renameJob(String oldFullName, String newFullName) {
+        LOGGER.log(Level.INFO, "renameJob({0}, {1})", new Object[]{oldFullName, newFullName});
 
     }
 
     @Override
     public void deleteJob(String jobFullName) {
+        LOGGER.log(Level.INFO, "deleteJob({0})", new Object[]{jobFullName});
 
     }
 
     @Override
     public void deleteBuild(String jobFullName, int buildNumber) {
+        LOGGER.log(Level.INFO, "deleteBuild({0}#{1})", new Object[]{jobFullName, buildNumber});
 
     }
 
@@ -68,10 +90,34 @@ public class PipelineMavenPluginNullDao implements PipelineMavenPluginDao {
     public List<String> listDownstreamJobs(@Nonnull String jobFullName, int buildNumber) {
         return Collections.emptyList();
     }
+    
+    @Nonnull
+    @Override
+    public Map<String, Integer> listUpstreamJobs(String jobFullName, int buildNumber) {
+        return Collections.emptyMap();
+    }
+    
+    @Nonnull
+    @Override
+    public Map<String, Integer> listTransitiveUpstreamJobs(String jobFullName, int buildNumber) {
+        return Collections.emptyMap();
+    }
 
     @Override
     public void cleanup() {
+        LOGGER.log(Level.INFO, "cleanup()");
+    }
 
+    @Nonnull
+    @Override
+    public List<MavenArtifact> getGeneratedArtifacts(@Nonnull String jobFullName, int buildNumber) {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void updateBuildOnCompletion(@Nonnull String jobFullName, int buildNumber, int buildResultOrdinal, long startTimeInMillis, long durationInMillis) {
+        LOGGER.log(Level.INFO, "updateBuildOnCompletion({0}, {1}, result: {2}, startTime): {3}, duration: {4}",
+                new Object[]{jobFullName, buildNumber, buildResultOrdinal, startTimeInMillis, durationInMillis});
     }
 
     @Override
